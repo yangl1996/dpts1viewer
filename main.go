@@ -37,6 +37,7 @@ func (d *device) Update() error {
 	return nil
 }
 
+// TODO: support landscape mode
 // TODO: lock-free
 func (d *device) Refresh() error {
 	conn, err := net.Dial("tcp", d.addr)
@@ -45,7 +46,7 @@ func (d *device) Refresh() error {
 	}
 	defer conn.Close()
 	if d.buffer == nil {
-		d.buffer = bufio.NewReader(conn)
+		d.buffer = bufio.NewReaderSize(conn, 16 * 1024 * 1024)
 	} else {
 		d.buffer.Reset(conn)
 	}
@@ -62,15 +63,16 @@ func (d *device) Refresh() error {
 			d.searchIndex = 0
 		}
 	}
-	d.lock.Lock()
-	defer d.lock.Unlock()
-	d.display, err = jpeg.Decode(d.buffer)
-	b := d.display.Bounds()
-	d.x = b.Max.X
-	d.y = b.Max.Y
+	img, err := jpeg.Decode(d.buffer)
 	if err != nil {
 		return err
 	} else {
+		d.lock.Lock()
+		d.display = img
+		b := d.display.Bounds()
+		d.x = b.Max.X
+		d.y = b.Max.Y
+		d.lock.Unlock()
 		ebiten.ScheduleFrame()
 		return nil
 	}
