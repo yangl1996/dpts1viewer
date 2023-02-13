@@ -11,8 +11,9 @@ import (
 	"image"
 	"image/jpeg"
 	"github.com/hajimehoshi/ebiten/v2"
-	"bytes"
-	"io"
+	"bufio"
+	"flag"
+	"runtime/pprof"
 )
 
 type device struct {
@@ -21,6 +22,9 @@ type device struct {
 	lock *sync.Mutex
 	x int
 	y int
+
+	buffer *bufio.Reader
+	searchIndex int
 }
 
 var ENDTAG = []byte("</command>\n")
@@ -40,20 +44,36 @@ func (d *device) Refresh() error {
 		return err
 	}
 	defer conn.Close()
-	buffer, err := io.ReadAll(conn)
-	first := bytes.Index(buffer, ENDTAG)
-	if first == -1 {
-		return errors.New("cannot find start of image")
+	if d.buffer == nil {
+		d.buffer = bufio.NewReader(conn)
+	} else {
+		d.buffer.Reset(conn)
 	}
-	first += len(ENDTAG)
-	r := bytes.NewReader(buffer[first:])
+	// search for beginning of image
+	d.searchIndex = 0
+	for d.searchIndex < len(ENDTAG) {
+		b, err := d.buffer.ReadByte()
+		if err != nil {
+			return err
+		}
+		if b == ENDTAG[d.searchIndex] {
+			d.searchIndex += 1
+		} else {
+			d.searchIndex = 0
+		}
+	}
 	d.lock.Lock()
 	defer d.lock.Unlock()
-	d.display, err = jpeg.Decode(r)
+	d.display, err = jpeg.Decode(d.buffer)
 	b := d.display.Bounds()
 	d.x = b.Max.X
 	d.y = b.Max.Y
-	return err
+	if err != nil {
+		return err
+	} else {
+		ebiten.ScheduleFrame()
+		return nil
+	}
 }
 
 func (d *device) Draw(screen *ebiten.Image){
@@ -74,6 +94,21 @@ func (d *device) Layout(outsideWidth, outsideHeight int) (screenWidth, screenHei
 }
 
 func main() {
+	cpuprofile := flag.String("cpuprofile", "", "write cpu profile to `file`")
+	flag.Parse()
+	if *cpuprofile != "" {
+		f, err := os.Create(*cpuprofile)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "could not create CPU profile: ", err)
+			os.Exit(1)
+		}
+		defer f.Close()
+		if err := pprof.StartCPUProfile(f); err != nil {
+			fmt.Fprintln(os.Stderr, "could not start CPU profile: ", err)
+			os.Exit(1)
+		}
+		defer pprof.StopCPUProfile()
+	}
 	// TODO: confirm if DPT API really requires repeatedly establishing connections
 	addr, err := getDPTS1Addr()
 	if err != nil {
@@ -87,8 +122,9 @@ func main() {
 	d.Refresh()	// make sure we have the image before start the UI
 	ebiten.SetWindowSize(d.x / 2, d.y / 2)
 	ebiten.SetWindowTitle("DPT-S1 Screen Sharing")
+	ebiten.SetFPSMode(ebiten.FPSModeVsyncOffMinimum)
 	go func() {
-		for ;;{
+		for ;; {
 			d.Refresh()
 		}
 	}()
