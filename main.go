@@ -18,17 +18,28 @@ import (
 type device struct {
 	addr string
 	display image.Image
-	lock *sync.Mutex	
+	lock *sync.Mutex
+	x int
+	y int
 }
 
 var ENDTAG = []byte("</command>\n")
 
-// TODO: lock-free
 func (d *device) Update() error {
+	// Ebiten calls Update and Draw non-concurrently. Since download image
+	// from DPT-S1 is slow, we do not want that happen in the critical path.
+	// Instead the screen refreshing logic happens in the Refresh function
+	// which we call in a separate goroutine.
+	return nil
+}
+
+// TODO: lock-free
+func (d *device) Refresh() error {
 	conn, err := net.Dial("tcp", d.addr)
 	if err != nil {
 		return err
 	}
+	defer conn.Close()
 	buffer, err := io.ReadAll(conn)
 	first := bytes.Index(buffer, ENDTAG)
 	if first == -1 {
@@ -39,6 +50,9 @@ func (d *device) Update() error {
 	d.lock.Lock()
 	defer d.lock.Unlock()
 	d.display, err = jpeg.Decode(r)
+	b := d.display.Bounds()
+	d.x = b.Max.X
+	d.y = b.Max.Y
 	return err
 }
 
@@ -56,12 +70,7 @@ func (d *device) Draw(screen *ebiten.Image){
 func (d *device) Layout(outsideWidth, outsideHeight int) (screenWidth, screenHeight int) {
 	d.lock.Lock()
 	defer d.lock.Unlock()
-	if d.display == nil {
-		return 1, 1
-	} else {
-		bnd := d.display.Bounds()
-		return bnd.Max.X, bnd.Max.Y
-	}
+	return d.x, d.y 
 }
 
 func main() {
@@ -72,9 +81,17 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Println("found DPT-S1 at", addr)
-	d := &device{addr, nil, &sync.Mutex{}}
-	ebiten.SetWindowSize(640, 480)
+	d := &device{
+		addr: addr,
+		lock: &sync.Mutex{}}
+	d.Refresh()	// make sure we have the image before start the UI
+	ebiten.SetWindowSize(d.x / 2, d.y / 2)
 	ebiten.SetWindowTitle("DPT-S1 Screen Sharing")
+	go func() {
+		for ;;{
+			d.Refresh()
+		}
+	}()
 	if err := ebiten.RunGame(d); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
