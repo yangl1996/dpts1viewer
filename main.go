@@ -143,6 +143,7 @@ func (d *device) Layout(outsideWidth, outsideHeight int) (screenWidth, screenHei
 
 func main() {
 	cpuprofile := flag.String("cpuprofile", "", "write cpu profile to `file`")
+	interval := flag.Duration("i", time.Duration(1 * time.Second), "refreshing interval")
 	flag.Parse()
 	if *cpuprofile != "" {
 		f, err := os.Create(*cpuprofile)
@@ -177,7 +178,9 @@ func main() {
 	}
 	ebiten.SetWindowTitle("DPT-S1 Display")
 	go func() {
-		for ;; {
+		t := time.NewTicker(*interval)
+		for {
+			<-t.C
 			d.Refresh()
 		}
 	}()
