@@ -7,38 +7,42 @@ import (
 	"os"
 	"time"
 	"context"
-	"sync"
-	"image"
+	"sync/atomic"
 	"image/jpeg"
 	"github.com/hajimehoshi/ebiten/v2"
 	"bufio"
 	"flag"
 	"runtime/pprof"
+	"math"
 )
 
 type device struct {
 	addr string
-	display image.Image
-	lock *sync.Mutex
-	x int
-	y int
+	display *atomic.Pointer[ebiten.Image]
+	landscape *atomic.Bool // portrait=1200x1600, landscape=1600x1200
 
+	lastDraw *ebiten.Image
 	buffer *bufio.Reader
-	searchIndex int
 }
 
 var ENDTAG = []byte("</command>\n")
+var PORTRAIT = []byte("portrait")
+var ROTATE = &ebiten.DrawImageOptions{}
+
+func init() {
+	ROTATE.GeoM.Translate(-1200/2, -1600/2)	// move centerpoint to origin
+	ROTATE.GeoM.Rotate(270 * 2 * math.Pi / 360)	// rotate at origin
+	ROTATE.GeoM.Translate(1600/2, 1200/2) // move back
+}
 
 func (d *device) Update() error {
-	// Ebiten calls Update and Draw non-concurrently. Since download image
-	// from DPT-S1 is slow, we do not want that happen in the critical path.
-	// Instead the screen refreshing logic happens in the Refresh function
-	// which we call in a separate goroutine.
+	// Update seems to block Draw. Since downloading image from DPT-S1 is slow,
+	// we do not want that happen in the critical path. Instead the screen
+	// refreshing logic happens in the Refresh function which we call in a
+	// separate goroutine.
 	return nil
 }
 
-// TODO: support landscape mode
-// TODO: lock-free
 func (d *device) Refresh() error {
 	conn, err := net.Dial("tcp", d.addr)
 	if err != nil {
@@ -46,53 +50,71 @@ func (d *device) Refresh() error {
 	}
 	defer conn.Close()
 	if d.buffer == nil {
-		d.buffer = bufio.NewReaderSize(conn, 16 * 1024 * 1024)
+		d.buffer = bufio.NewReader(conn)
 	} else {
 		d.buffer.Reset(conn)
 	}
-	// search for beginning of image
-	d.searchIndex = 0
-	for d.searchIndex < len(ENDTAG) {
+	// search for beginning of image and mode
+	demidx := 0		// idx of ENDTAG we are matching next
+	poridx := 0		// idx of PORTRAIT we are matching next
+	for demidx < len(ENDTAG) {
 		b, err := d.buffer.ReadByte()
 		if err != nil {
 			return err
 		}
-		if b == ENDTAG[d.searchIndex] {
-			d.searchIndex += 1
+		if b == ENDTAG[demidx] {
+			demidx += 1
 		} else {
-			d.searchIndex = 0
+			demidx = 0
+		}
+		if poridx < len(PORTRAIT) {
+			if b == PORTRAIT[poridx] {
+				poridx += 1
+			} else {
+				poridx = 0
+			}
 		}
 	}
 	img, err := jpeg.Decode(d.buffer)
 	if err != nil {
 		return err
-	} else {
-		d.lock.Lock()
-		d.display = img
-		b := d.display.Bounds()
-		d.x = b.Max.X
-		d.y = b.Max.Y
-		d.lock.Unlock()
-		ebiten.ScheduleFrame()
-		return nil
 	}
+
+	if poridx != len(PORTRAIT) {
+		// landscape mode; we need to rotate the image
+		// resize window if not already in landscape mode
+		if d.landscape.CompareAndSwap(false, true) {
+			ebiten.SetWindowSize(800, 600)
+		}
+	} else {
+		// portrait mode, resize window if needed
+		if d.landscape.CompareAndSwap(true, false) {
+			ebiten.SetWindowSize(600, 800)
+		}
+	}
+	newImg := ebiten.NewImageFromImage(img)
+	d.display.Store(newImg)
+	return nil
 }
 
 func (d *device) Draw(screen *ebiten.Image){
-	d.lock.Lock()
-	img := ebiten.NewImageFromImage(d.display)
-	d.lock.Unlock()
-	if d.display != nil {
-		screen.Clear()
-		screen.DrawImage(img, nil)
+	img := d.display.Load()
+	if img != nil {
+		if d.landscape.Load() {
+			screen.DrawImage(img, ROTATE)
+		} else {
+			screen.DrawImage(img, nil)
+		}
 	}
 	return
 }
 
 func (d *device) Layout(outsideWidth, outsideHeight int) (screenWidth, screenHeight int) {
-	d.lock.Lock()
-	defer d.lock.Unlock()
-	return d.x, d.y 
+	if d.landscape.Load() {
+		return 1600, 1200
+	} else {
+		return 1200, 1600
+	}
 }
 
 func main() {
@@ -111,7 +133,7 @@ func main() {
 		}
 		defer pprof.StopCPUProfile()
 	}
-	// TODO: confirm if DPT API really requires repeatedly establishing connections
+	// TODO: confirm if DPT API really requires repeatedly establishing connections. For example, is there any other port that we can talk to which gives us a persistent connection?
 	addr, err := getDPTS1Addr()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -120,11 +142,16 @@ func main() {
 	fmt.Println("found DPT-S1 at", addr)
 	d := &device{
 		addr: addr,
-		lock: &sync.Mutex{}}
+		display: &atomic.Pointer[ebiten.Image]{},
+		landscape: &atomic.Bool{},
+	}
 	d.Refresh()	// make sure we have the image before start the UI
-	ebiten.SetWindowSize(d.x / 2, d.y / 2)
-	ebiten.SetWindowTitle("DPT-S1 Screen Sharing")
-	ebiten.SetFPSMode(ebiten.FPSModeVsyncOffMinimum)
+	if d.landscape.Load() {
+		ebiten.SetWindowSize(800, 600)
+	} else {
+		ebiten.SetWindowSize(600, 800)
+	}
+	ebiten.SetWindowTitle("DPT-S1 Display")
 	go func() {
 		for ;; {
 			d.Refresh()
