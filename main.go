@@ -8,6 +8,8 @@ import (
 	"time"
 	"context"
 	"sync/atomic"
+	"image/draw"
+	"image"
 	"image/jpeg"
 	"github.com/hajimehoshi/ebiten/v2"
 	"bufio"
@@ -18,10 +20,12 @@ import (
 
 type device struct {
 	addr string
-	display *atomic.Pointer[ebiten.Image]
+	display *atomic.Pointer[image.YCbCr]
 	landscape *atomic.Bool // portrait=1200x1600, landscape=1600x1200
 
-	lastDraw *ebiten.Image
+	framebuffer *ebiten.Image
+	rgbabuffer *image.RGBA
+	lastDraw *image.YCbCr
 	buffer *bufio.Reader
 }
 
@@ -92,18 +96,38 @@ func (d *device) Refresh() error {
 			ebiten.SetWindowSize(600, 800)
 		}
 	}
-	newImg := ebiten.NewImageFromImage(img)
-	d.display.Store(newImg)
+	d.display.Store(img.(*image.YCbCr))
 	return nil
 }
 
 func (d *device) Draw(screen *ebiten.Image){
 	img := d.display.Load()
 	if img != nil {
+		if d.framebuffer == nil {
+			d.framebuffer = ebiten.NewImage(1200, 1600)
+		}
+		// We could have called image/draw.Draw to draw directly on the
+		// framebuffer (ebiten.Image), but apparently that calls draw.Set on
+		// individual pixels and is slow. draw.Draw has specialization for
+		// image.RGBA, so we allocate an image.RGBA (reused) as the
+		// intermediary.
+		// Idea came from https://github.com/hajimehoshi/ebiten/blob/4c520581b89b05c1dd06baaa7c646f095f37980a/imagetobytes.go#L78
+		if d.rgbabuffer == nil {
+			d.rgbabuffer = &image.RGBA{
+				Pix: make([]byte, 4*1200*1600),
+				Stride: 4*1200,
+				Rect: image.Rectangle{image.Point{0, 0}, image.Point{1200, 1600}},
+			}
+		}
+		if d.lastDraw != img {
+			draw.Draw(d.rgbabuffer, image.Rectangle{image.Point{0, 0}, image.Point{1200, 1600}}, img, image.Point{0, 0}, draw.Src)
+			d.framebuffer.WritePixels(d.rgbabuffer.Pix)
+			d.lastDraw = img
+		}
 		if d.landscape.Load() {
-			screen.DrawImage(img, ROTATE)
+			screen.DrawImage(d.framebuffer, ROTATE)
 		} else {
-			screen.DrawImage(img, nil)
+			screen.DrawImage(d.framebuffer, nil)
 		}
 	}
 	return
@@ -142,7 +166,7 @@ func main() {
 	fmt.Println("found DPT-S1 at", addr)
 	d := &device{
 		addr: addr,
-		display: &atomic.Pointer[ebiten.Image]{},
+		display: &atomic.Pointer[image.YCbCr]{},
 		landscape: &atomic.Bool{},
 	}
 	d.Refresh()	// make sure we have the image before start the UI
