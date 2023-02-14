@@ -3,10 +3,8 @@ package main
 import (
 	"net"
 	"fmt"
-	"errors"
 	"os"
 	"time"
-	"context"
 	"sync/atomic"
 	"image/draw"
 	"image"
@@ -141,10 +139,15 @@ func (d *device) Layout(outsideWidth, outsideHeight int) (screenWidth, screenHei
 	}
 }
 
+// TODO: confirm if DPT API really requires repeatedly establishing
+// connections. For example, is there any other port that we can talk to which
+// gives us a persistent connection?
 func main() {
 	cpuprofile := flag.String("cpuprofile", "", "write cpu profile to `file`")
 	interval := flag.Duration("i", time.Duration(1 * time.Second), "refreshing interval")
+	usePolling := flag.Bool("poll", false, "use polling to discover DPT-S1 (avoids opening UDP listening socket)")
 	flag.Parse()
+
 	if *cpuprofile != "" {
 		f, err := os.Create(*cpuprofile)
 		if err != nil {
@@ -158,13 +161,21 @@ func main() {
 		}
 		defer pprof.StopCPUProfile()
 	}
-	// TODO: confirm if DPT API really requires repeatedly establishing connections. For example, is there any other port that we can talk to which gives us a persistent connection?
-	addr, err := getDPTS1Addr()
+
+	// locate DPT-S1
+	var err error
+	var addr string
+	if *usePolling {
+		addr, err = getDPTS1AddrPolling()
+	} else {
+		addr, err = getDPTS1Addr()
+	}
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 	fmt.Println("found DPT-S1 at", addr)
+
 	d := &device{
 		addr: addr,
 		display: &atomic.Pointer[image.YCbCr]{},
@@ -190,35 +201,3 @@ func main() {
 	}
 }
 
-func getDPTS1Addr() (string, error) {
-	// TODO: handle conflict/multiple devices
-	// TODO: find the device without polling?
-	dialer := &net.Dialer{}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	connCh := make(chan net.Conn)
-	for i := 0; i < 256; i++ {
-		scan := func(i int) {
-			remoteAddr := fmt.Sprintf("203.0.113.%d:54321", i)
-			conn, err := dialer.DialContext(ctx, "tcp", remoteAddr)
-			if err != nil {
-				if conn != nil {
-					conn.Close()
-				}
-			} else {
-				connCh <- conn
-			}
-		}
-		go scan(i)
-	}
-
-	timer := time.NewTimer(3 * time.Second)
-	select {
-	case <-timer.C:
-		return "", errors.New("cannot establish connection to DPT-S1")
-	case c := <-connCh:
-		defer c.Close()
-		return c.RemoteAddr().String(), nil
-	}
-}
