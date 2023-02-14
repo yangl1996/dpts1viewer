@@ -46,6 +46,9 @@ func (d *device) Update() error {
 }
 
 func (d *device) Refresh() error {
+	// It is silly that we have to start new TCP connections every time. But it
+	// seems like the behavior of Sony's client as well, so there is little we
+	// can do.
 	conn, err := net.Dial("tcp", d.addr)
 	if err != nil {
 		return err
@@ -139,9 +142,6 @@ func (d *device) Layout(outsideWidth, outsideHeight int) (screenWidth, screenHei
 	}
 }
 
-// TODO: confirm if DPT API really requires repeatedly establishing
-// connections. For example, is there any other port that we can talk to which
-// gives us a persistent connection?
 func main() {
 	cpuprofile := flag.String("cpuprofile", "", "write cpu profile to `file`")
 	interval := flag.Duration("i", time.Duration(1 * time.Second), "refreshing interval")

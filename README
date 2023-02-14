@@ -6,4 +6,3 @@ To use, turn on screen sharing on DPT-S1 in settings -> system settings, and
 connect the device to your computer. DPT-S1 will appear as a USB ethernet
 interface.
 
-Reference: https://github.com/tjwei/PyDPTS1

@@ -56,6 +56,9 @@ func getDPTS1Addr() (string, error) {
 	return raddr.String(), nil
 }
 
+// getDPTS1AddrPolling searches for the device by trying to connect to
+// every address in 203.0.113.0/24. The method is copied from
+// https://github.com/tjwei/PyDPTS1.
 func getDPTS1AddrPolling() (string, error) {
 	dialer := &net.Dialer{}
 	ctx, cancel := context.WithCancel(context.Background())
